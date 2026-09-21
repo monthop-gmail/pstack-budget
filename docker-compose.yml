@@ -1,0 +1,54 @@
+services:
+  app:
+    build:
+      context: .
+      args:
+        PSTACK_REF: ${PSTACK_REF:-v0.5.1}
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data:ro
+      - ${BUDGET_DOCS_HOST_PATH:-./docs}:/docs:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  worker:
+    build:
+      context: .
+      args:
+        PSTACK_REF: ${PSTACK_REF:-v0.5.1}
+    restart: unless-stopped
+    command: python -m arq core.worker.WorkerSettings
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-budget}
+      POSTGRES_USER: ${DB_USER:-budget}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-budget} -d ${DB_NAME:-budget}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+volumes:
+  pgdata:
