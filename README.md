@@ -23,6 +23,24 @@ curl --user "$BUDGET_API_USER:$BUDGET_PASSWORD" 'http://127.0.0.1:8000/api/searc
 หน้าเว็บใช้เฉพาะ `BUDGET_PASSWORD`; API/curl ใช้ Basic Auth username จาก
 `BUDGET_API_USER`. `/healthz` เปิดสาธารณะเพื่อ health check.
 
+## Web Watch: e-GP Process5 (backend first)
+
+รุ่นแรกติดตามหน้า Process5 ที่ทีมระบุไว้ และใช้ RSS สาธารณะของ e-GP เพื่อพบ
+ประกาศใหม่ ระบบเก็บ state และ event ใน PostgreSQL ของ pstack; SQLite งบและ PDF
+ยัง mount แบบ read-only. หน้า Process5 เป็น Angular SPA และการค้นหาถูกคุ้มครองด้วย
+Cloudflare Turnstile ดังนั้น watcher **ไม่** scrape ผลค้นหาหรือพยายามข้ามการ
+ป้องกันนั้น
+
+หลัง deploy, ตรวจผลผ่าน API ที่ต้องยืนยันตัวตน:
+
+```bash
+curl --user "$BUDGET_API_USER:$BUDGET_PASSWORD" http://127.0.0.1:8000/api/watch/sources
+curl --user "$BUDGET_API_USER:$BUDGET_PASSWORD" http://127.0.0.1:8000/api/watch/events
+curl --request POST --user "$BUDGET_API_USER:$BUDGET_PASSWORD" http://127.0.0.1:8000/api/watch/run
+```
+
+worker เดิมของ pstack ทำงานทุก 15 นาทีเป็นค่าเริ่มต้น (`WATCH_INTERVAL_MINUTES`).
+
 ## Cutover แบบปลอดภัย
 
 1. รัน compose นี้คนละ port/project กับ `budget2570-search` เดิม

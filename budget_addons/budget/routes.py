@@ -17,10 +17,18 @@ import secrets
 import sqlite3
 import time
 from pathlib import Path
+from typing import Annotated
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from core.db import get_session
+
+from .models import WatchEvent, WatchSource
+from .watch_services import run_once as run_watch_once
 
 router = APIRouter(tags=["budget"])
 
@@ -300,3 +308,31 @@ async def file(document_path: str, request: Request):
     if root not in candidate.parents or not candidate.is_file() or candidate.suffix.lower() != ".pdf":
         raise HTTPException(404, "document not found")
     return FileResponse(candidate, media_type="application/pdf", content_disposition_type="inline")
+
+
+@router.get("/api/watch/sources")
+async def watch_sources(request: Request, session: Annotated[AsyncSession, Depends(get_session)]):
+    """List backend watcher sources and their last check state."""
+    if not _authenticated(request):
+        raise HTTPException(401, "unauthorized", headers={"WWW-Authenticate": "Basic"})
+    rows = (await session.execute(select(WatchSource).order_by(WatchSource.id))).scalars()
+    return {"sources": [{"id": row.id, "name": row.name, "url": row.url, "feed_url": row.feed_url, "enabled": row.enabled, "last_checked_at": row.last_checked_at, "last_status": row.last_status, "last_error": row.last_error} for row in rows]}
+
+
+@router.get("/api/watch/events")
+async def watch_events(request: Request, session: Annotated[AsyncSession, Depends(get_session)], limit: int = 100):
+    """Return latest normalized e-GP events; no source HTML is exposed."""
+    if not _authenticated(request):
+        raise HTTPException(401, "unauthorized", headers={"WWW-Authenticate": "Basic"})
+    rows = (await session.execute(select(WatchEvent).order_by(WatchEvent.discovered_at.desc(), WatchEvent.id.desc()).limit(min(max(limit, 1), 500)))).scalars()
+    return {"events": [{"id": row.id, "source_id": row.source_id, "kind": row.kind, "title": row.title, "url": row.url, "published_at": row.published_at, "summary": row.summary, "discovered_at": row.discovered_at} for row in rows]}
+
+
+@router.post("/api/watch/run")
+async def watch_run(request: Request, session: Annotated[AsyncSession, Depends(get_session)]):
+    """Manually run the worker once; scheduled runs use the watcher service."""
+    if not _authenticated(request):
+        raise HTTPException(401, "unauthorized", headers={"WWW-Authenticate": "Basic"})
+    result = await run_watch_once(session)
+    await session.commit()
+    return result
