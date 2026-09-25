@@ -1,4 +1,4 @@
-"""Conservative public-feed watcher; persistence is supplied by pstack PostgreSQL."""
+"""Public URL and feed watcher; persistence is supplied by pstack PostgreSQL."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import WatchEvent, WatchSource
 from . import egp_process3
+from .watch_url import fetch_public
 
 DEFAULT_SOURCE_URL = "https://process5.gprocurement.go.th/egp-agpc01-web/announcement?keywordSearch=&advancedSearch=true"
 DEFAULT_RSS_URL = "https://process.gprocurement.go.th/EPROCRssFeedWeb/egpannouncerss.xml"
@@ -97,12 +98,15 @@ async def run_once(
     sources = list((await session.execute(select(WatchSource).where(WatchSource.enabled.is_(True)))).scalars())
     totals = {"sources": 0, "events": 0, "errors": 0, "changes": 0}
     now = datetime.now(UTC)
-    async def get_url(url: str) -> FetchResult:
+    async def get_url(url: str, *, public: bool = False) -> FetchResult:
         # Injecting a deterministic fetcher keeps unit tests independent from
         # the platform's thread executor. Runtime uses a worker thread so a
         # 30-second public HTTP timeout never blocks the event loop.
         if fetcher is not None:
             return fetcher(url)
+        if public:
+            status, body, etag, last_modified = await asyncio.to_thread(fetch_public, url)
+            return FetchResult(status, body, etag, last_modified)
         return await asyncio.to_thread(fetch, url, opener)
 
     for source in sources:
@@ -132,7 +136,8 @@ async def run_once(
             continue
         totals["sources"] += 1
         try:
-            page = await get_url(source.url)
+            is_user_source = source.id != "egp-process5-announcement"
+            page = await get_url(source.url, public=is_user_source)
             if not 200 <= page.status < 300:
                 raise ValueError(f"source returned HTTP {page.status}")
             digest = hashlib.sha256(page.body).hexdigest()
@@ -142,10 +147,10 @@ async def run_once(
             if changed:
                 key = "page:" + digest
                 if await session.scalar(select(WatchEvent.id).where(WatchEvent.source_id == source.id, WatchEvent.event_key == key)) is None:
-                    session.add(WatchEvent(source_id=source.id, event_key=key, kind="source_changed", title="หน้าประกาศ e-GP มีการเปลี่ยนแปลง", url=source.url, discovered_at=now))
+                    session.add(WatchEvent(source_id=source.id, event_key=key, kind="source_changed", title=f"หน้า {source.name} มีการเปลี่ยนแปลง", url=source.url, discovered_at=now))
                     totals["changes"] += 1
             if source.feed_url:
-                feed = await get_url(source.feed_url)
+                feed = await get_url(source.feed_url, public=is_user_source)
                 if not 200 <= feed.status < 300:
                     raise ValueError(f"RSS returned HTTP {feed.status}")
                 for item in rss_items(feed.body):

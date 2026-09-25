@@ -39,6 +39,22 @@ Process3 ตรวจทุก 60 นาที (`WATCH_EGP3_INTERVAL_MINUTES`) �
 ระบบจะเก็บรายการที่เห็นและบันทึก warning ใน `last_error` เพื่อไม่อ้างว่าครบ.
 หากโครงสร้างหน้าเปลี่ยนจนไม่พบประกาศ จะบันทึก error ไม่สร้าง event ปลอม.
 
+เพิ่ม URL สาธารณะที่มนุษย์ต้องการติดตามได้ผ่าน API (ยังไม่มีหน้า UI):
+
+```bash
+curl --request POST --user "$BUDGET_API_USER:$BUDGET_PASSWORD" \
+  --header 'Content-Type: application/json' \
+  --data '{"url":"https://example.org/news"}' \
+  http://127.0.0.1:8000/api/watch/sources
+```
+
+ใส่ `name` และ `feed_url` เพิ่มได้ถ้าทราบ RSS ของเว็บนั้น. URL ทั่วไปจะสร้าง
+baseline ในรอบแรก แล้วแจ้ง `source_changed` เมื่อเนื้อหาหน้าเปลี่ยน; หากกำหนด
+`feed_url` จะสร้าง event จากรายการใน feed ด้วย. การแยก "ประกาศใหม่" จาก HTML
+ของ Joomla/WordPress/Odoo ยังต้องมี adapter เฉพาะภายหลัง. ระบบรับเฉพาะ URL
+HTTP(S) สาธารณะ, ไม่รับ credential ใน URL, ไม่ตาม redirect และตรวจ/ตรึง IP
+สาธารณะก่อนเชื่อมต่อ เพื่อไม่ให้ URL ที่เพิ่มพา worker เข้าถึงเครือข่ายภายใน.
+
 หลัง deploy, ตรวจผลผ่าน API ที่ต้องยืนยันตัวตน:
 
 ```bash

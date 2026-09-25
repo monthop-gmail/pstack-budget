@@ -18,10 +18,11 @@ import sqlite3
 import time
 from pathlib import Path
 from typing import Annotated
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +30,7 @@ from core.db import get_session
 
 from .models import WatchEvent, WatchSource
 from .watch_services import run_once as run_watch_once
+from .watch_url import validate_public_url
 
 router = APIRouter(tags=["budget"])
 
@@ -317,6 +319,34 @@ async def watch_sources(request: Request, session: Annotated[AsyncSession, Depen
         raise HTTPException(401, "unauthorized", headers={"WWW-Authenticate": "Basic"})
     rows = (await session.execute(select(WatchSource).order_by(WatchSource.id))).scalars()
     return {"sources": [{"id": row.id, "name": row.name, "url": row.url, "feed_url": row.feed_url, "enabled": row.enabled, "last_checked_at": row.last_checked_at, "last_status": row.last_status, "last_error": row.last_error} for row in rows]}
+
+
+class WatchSourceInput(BaseModel):
+    name: str | None = Field(default=None, max_length=255)
+    url: str
+    feed_url: str | None = None
+
+
+@router.post("/api/watch/sources", status_code=201)
+async def watch_create_source(request: Request, body: WatchSourceInput, session: Annotated[AsyncSession, Depends(get_session)]):
+    """Register a public URL for monitoring; extraction adapters remain separate."""
+    if not _authenticated(request):
+        raise HTTPException(401, "unauthorized", headers={"WWW-Authenticate": "Basic"})
+    try:
+        url = validate_public_url(body.url)
+        feed_url = validate_public_url(body.feed_url) if body.feed_url else None
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    source_id = "user-" + hashlib.sha256(url.encode()).hexdigest()[:24]
+    if await session.get(WatchSource, source_id) is not None:
+        raise HTTPException(409, "URL is already monitored")
+    name = body.name.strip() if body.name else (urlsplit(url).hostname or "Website")
+    if not name:
+        raise HTTPException(422, "name must not be blank")
+    source = WatchSource(id=source_id, name=name, url=url, feed_url=feed_url, enabled=True)
+    session.add(source)
+    await session.commit()
+    return {"id": source.id, "name": source.name, "url": source.url, "feed_url": source.feed_url, "enabled": source.enabled}
 
 
 @router.get("/api/watch/events")

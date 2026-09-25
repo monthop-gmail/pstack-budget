@@ -123,3 +123,25 @@ async def test_run_once_records_incomplete_crawl_warning():
     assert totals["errors"] == 1
     assert "pagination cap" in session.sources[watch.PROCESS3_SOURCE_ID].last_error
     assert session.events[0].event_key == item.key
+
+
+@pytest.mark.asyncio
+async def test_user_url_baselines_then_emits_page_change():
+    session = FakeSession()
+    session.add(watch.WatchSource(id="user-example", name="News", url="https://example.org/news", enabled=True))
+    current = [b"first"]
+
+    def fetcher(url):
+        if "RssFeed" in url:
+            return watch.FetchResult(200, b"<rss></rss>")
+        return watch.FetchResult(200, current[0] if url == "https://example.org/news" else b"fixed")
+
+    crawler = lambda **_: egp3.CrawlResult([], 1, True)
+    await watch.run_once(session, fetcher=fetcher, process3_crawler=crawler)
+    assert not any(event.source_id == "user-example" for event in session.events)
+    current[0] = b"updated"
+    result = await watch.run_once(session, fetcher=fetcher, process3_crawler=crawler)
+    assert result["changes"] == 1
+    changed = next(event for event in session.events if event.source_id == "user-example")
+    assert changed.kind == "source_changed"
+    assert "News" in changed.title
