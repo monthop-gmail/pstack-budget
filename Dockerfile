@@ -10,7 +10,7 @@ RUN git clone --depth 1 --branch "${PSTACK_REF}" \
     && rm -rf /app/.git
 
 WORKDIR /app
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir . 'beautifulsoup4>=4.12,<5'
 
 COPY budget_addons /app/budget_addons
 # The production index and source PDFs are intentionally mounted read-only,

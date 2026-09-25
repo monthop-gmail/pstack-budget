@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
+import os
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -16,9 +17,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import WatchEvent, WatchSource
+from . import egp_process3
 
 DEFAULT_SOURCE_URL = "https://process5.gprocurement.go.th/egp-agpc01-web/announcement?keywordSearch=&advancedSearch=true"
 DEFAULT_RSS_URL = "https://process.gprocurement.go.th/EPROCRssFeedWeb/egpannouncerss.xml"
+PROCESS3_SOURCE_ID = "egp-process3-announcement"
 USER_AGENT = "pstack-budget-watch/0.1 (+contact: operations)"
 MAX_RESPONSE_BYTES = 2_000_000
 
@@ -73,12 +76,22 @@ def rss_items(body: bytes) -> list[dict[str, str]]:
 async def seed_initial_source(session: AsyncSession) -> None:
     if await session.get(WatchSource, "egp-process5-announcement") is None:
         session.add(WatchSource(id="egp-process5-announcement", name="e-GP Process5 announcements", url=DEFAULT_SOURCE_URL, feed_url=DEFAULT_RSS_URL))
+    if await session.get(WatchSource, PROCESS3_SOURCE_ID) is None:
+        session.add(WatchSource(id=PROCESS3_SOURCE_ID, name="e-GP Process3 public search", url=egp_process3.URL))
+
+
+def _positive_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, str(default))))
+    except ValueError:
+        return default
 
 
 async def run_once(
     session: AsyncSession,
     opener: Callable[..., object] = urllib.request.urlopen,
     fetcher: Callable[[str], FetchResult] | None = None,
+    process3_crawler: Callable[..., egp_process3.CrawlResult] | None = None,
 ) -> dict[str, int]:
     await seed_initial_source(session)
     sources = list((await session.execute(select(WatchSource).where(WatchSource.enabled.is_(True)))).scalars())
@@ -93,6 +106,30 @@ async def run_once(
         return await asyncio.to_thread(fetch, url, opener)
 
     for source in sources:
+        if source.id == PROCESS3_SOURCE_ID:
+            interval = _positive_int("WATCH_EGP3_INTERVAL_MINUTES", 60)
+            if source.last_checked_at and (now - source.last_checked_at).total_seconds() < interval * 60:
+                continue
+            totals["sources"] += 1
+            try:
+                crawler = process3_crawler or egp_process3.crawl
+                max_pages = min(_positive_int("WATCH_EGP3_MAX_PAGES", 20), 100)
+                result = (crawler(max_pages=max_pages, delay_seconds=1.0) if process3_crawler
+                          else await asyncio.to_thread(crawler, max_pages=max_pages, delay_seconds=1.0))
+                digest = hashlib.sha256("\n".join(item.key for item in result.items).encode()).hexdigest()
+                source.last_checked_at, source.last_status = now, 200
+                source.content_hash = digest
+                source.last_error = None if result.complete else (result.warning or "Process3 crawl incomplete")
+                if not result.complete:
+                    totals["errors"] += 1
+                for item in result.items:
+                    if await session.scalar(select(WatchEvent.id).where(WatchEvent.source_id == source.id, WatchEvent.event_key == item.key)) is None:
+                        session.add(WatchEvent(source_id=source.id, event_key=item.key, kind="announcement", title=item.title, url=item.url, published_at=item.published, summary=item.summary, discovered_at=now))
+                        totals["events"] += 1
+            except ValueError as exc:
+                totals["errors"] += 1
+                source.last_checked_at, source.last_status, source.last_error = now, None, str(exc)[:500]
+            continue
         totals["sources"] += 1
         try:
             page = await get_url(source.url)

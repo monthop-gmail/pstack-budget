@@ -23,13 +23,21 @@ curl --user "$BUDGET_API_USER:$BUDGET_PASSWORD" 'http://127.0.0.1:8000/api/searc
 หน้าเว็บใช้เฉพาะ `BUDGET_PASSWORD`; API/curl ใช้ Basic Auth username จาก
 `BUDGET_API_USER`. `/healthz` เปิดสาธารณะเพื่อ health check.
 
-## Web Watch: e-GP Process5 (backend first)
+## Web Watch: e-GP (backend first)
 
-รุ่นแรกติดตามหน้า Process5 ที่ทีมระบุไว้ และใช้ RSS สาธารณะของ e-GP เพื่อพบ
-ประกาศใหม่ ระบบเก็บ state และ event ใน PostgreSQL ของ pstack; SQLite งบและ PDF
-ยัง mount แบบ read-only. หน้า Process5 เป็น Angular SPA และการค้นหาถูกคุ้มครองด้วย
-Cloudflare Turnstile ดังนั้น watcher **ไม่** scrape ผลค้นหาหรือพยายามข้ามการ
-ป้องกันนั้น
+ระบบติดตามหน้า Process5 ที่ทีมระบุไว้และ RSS สาธารณะของ e-GP ต่อไป พร้อม adapter
+ค้นหาประกาศสาธารณะบน Process3 ที่พัฒนาจากแนวทางทดลองเดิม: อ่าน HTML ภาษาไทย
+Windows-874, ขอผลค้นหาเป็น batch ต่อเนื่อง, ตัดรายการซ้ำระหว่างหน้า และสร้าง
+event จากเอกลักษณ์ของประกาศ (ไม่ใช้ project ID เพียงอย่างเดียว). URL ของ event
+Process3 ชี้ไปยังหน้าค้นหาต้นทาง เพราะยังไม่มี deep link ที่ยืนยันว่าเสถียร.
+แหล่งข้อมูลและประวัติ event แยกจาก Process5/RSS และเก็บใน PostgreSQL ของ pstack;
+SQLite งบและ PDF ยังคง read-only. หน้า Process5 เป็น Angular SPA และการค้นหาถูก
+คุ้มครองด้วย Cloudflare Turnstile; watcher **ไม่** ข้ามการป้องกันนั้น
+
+Process3 ตรวจทุก 60 นาที (`WATCH_EGP3_INTERVAL_MINUTES`) และจำกัดที่ 20 batch
+(`WATCH_EGP3_MAX_PAGES`, สูงสุด 100) โดยเว้น 1 วินาทีระหว่างคำขอ หากชนเพดาน
+ระบบจะเก็บรายการที่เห็นและบันทึก warning ใน `last_error` เพื่อไม่อ้างว่าครบ.
+หากโครงสร้างหน้าเปลี่ยนจนไม่พบประกาศ จะบันทึก error ไม่สร้าง event ปลอม.
 
 หลัง deploy, ตรวจผลผ่าน API ที่ต้องยืนยันตัวตน:
 
