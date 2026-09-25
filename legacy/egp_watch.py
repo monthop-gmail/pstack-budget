@@ -1,18 +1,28 @@
-# Public archive snapshot of the original pre-Process3 script.
+# Public mirror of the deployed Process3+RSS watcher.
 # Runtime paths and internal contact were replaced before publication.
 #!/usr/bin/env python3
 """เฝ้าดูประกาศ e-GP แล้วจับคู่กับรายการครุภัณฑ์รถในงบ 2570
 
-ดึง RSS ทางการของกรมบัญชีกลาง (ประกาศของ "วันนี้" เท่านั้น) จึงต้องรันวันละหลายรอบ
-เก็บทุกประกาศลง SQLite แล้วทำเครื่องหมายรายการที่ตรงกับ watchlist ของเรา
+ดึง RSS ทางการและผลค้นหาสาธารณะ Process3 แบบแบ่งชุด เพื่อไม่พึ่ง RSS ที่แสดง
+ประกาศเพียงส่วนน้อย เก็บประกาศลง SQLite และทำเครื่องหมายรายการที่ตรง watchlist
 
   python3 egp_watch.py            เก็บประกาศรอบปกติ
   python3 egp_watch.py --report   พิมพ์สรุปรายการที่ตรง 7 วันล่าสุด
 """
 import hashlib, html, os, re, sqlite3, sys, time, urllib.request
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
+
+import requests
+from bs4 import BeautifulSoup
 
 RSS = "https://process.gprocurement.go.th/EPROCRssFeedWeb/egpannouncerss.xml"
+PROCESS3 = "https://process3.gprocurement.go.th/egp2procmainWeb/procsearch.sch"
+PROCESS3_SEARCH = {"homeflag": "A", "proc_id": "FPRO9965", "servlet": "FPRO9965Servlet",
+                   "methodId": "", "announceType": "2"}
+PROCESS3_SEARCH_URL = PROCESS3 + "?" + urlencode(PROCESS3_SEARCH)
+MAX_GROUPS = 20
+PAGE_SIZE = 50
 DB = os.environ.get("EGP_WATCH_DB", "./data/egp_watch.db")
 BUDGET_DB = os.environ.get("BUDGET_DB", "./data/budget2570.db")
 UA = "budget2570-watch/1.0"
@@ -43,6 +53,79 @@ def parse(xml: str):
     return out, int(m.group(1)) if m else -1
 
 
+def parse_process3(response):
+    """Parse a server batch; the response is Windows-874 despite its headers."""
+    response.encoding = "cp874"
+    soup = BeautifulSoup(response.text, "html.parser")
+    items = []
+    for row in soup.select("tr[id^='trDetail']"):
+        cells = row.find_all("td", recursive=False)
+        if len(cells) < 4:
+            continue
+        texts = [" ".join(cell.get_text(" ", strip=True).split()) for cell in cells]
+        onclick = " ".join(tag.get("onclick", "") for tag in row.find_all(onclick=True))
+        project_match = re.search(r"(?:chklink|showPopupFileType9)\('([^']+)'", onclick)
+        project_id = project_match.group(1) if project_match else ""
+        title = texts[2]
+        if not title:
+            title_match = re.search(r"chklink\('[^']*','[^']*','[^']*','[^']*','(.*?)','\d{4}'", onclick, re.S)
+            title = html.unescape(title_match.group(1)).replace("&nbsp;", " ").strip() if title_match else ""
+        if not title:
+            continue
+        published = texts[3]
+        identity = "\x1f".join((project_id, title, published, onclick))
+        items.append({"id": "p3:" + hashlib.sha256(identity.encode()).hexdigest(),
+                      "title": title, "link": PROCESS3_SEARCH_URL, "pub": published,
+                      "desc": " | ".join(texts[1:])})
+    return items
+
+
+def process3_page_params(group):
+    return {"govStatus": "A", "announceType": "2", "budgetYear": "", "deptId": "",
+            "deptSubId": "", "moiId": "", "methodId": "", "typeId": "",
+            "project_id": "", "projectName": "", "announceSDate": "", "announceEDate": "",
+            "projectMoneyS": "", "projectMoneyE": "", "projectStatus": "", "priceBuild": "",
+            "beginrec": str(PAGE_SIZE * (group - 1) + 1),
+            "endrec": str(PAGE_SIZE * group + 1), "grouppage": str(group),
+            "homeflag": "A", "servlet": "FPRO9965Servlet", "proc_id": "FPRO9965",
+            "mode": "SEARCH"}
+
+
+def fetch_process3(max_groups=MAX_GROUPS, delay_seconds=1):
+    """Fetch bounded search batches with one cookie session; return completeness."""
+    if not 1 <= max_groups <= 100 or delay_seconds < 0:
+        raise ValueError("invalid Process3 limits")
+    seen = set()
+    items = []
+    complete = False
+    warning = ""
+    with requests.Session() as session:
+        session.headers.update({"User-Agent": UA, "Accept": "text/html"})
+        for group in range(1, max_groups + 1):
+            if group > 1 and delay_seconds:
+                time.sleep(delay_seconds)
+            response = (session.get(PROCESS3, params=PROCESS3_SEARCH, timeout=30) if group == 1
+                        else session.post(PROCESS3, data=process3_page_params(group), timeout=30))
+            response.raise_for_status()
+            if len(response.content) > 2_000_000:
+                raise ValueError("Process3 response exceeds size limit")
+            batch = parse_process3(response)
+            if group == 1 and not batch:
+                raise ValueError("Process3 returned no announcement rows; page format may have changed")
+            new = [item for item in batch if item["id"] not in seen]
+            if not new:
+                warning = f"Process3 pagination did not advance at group {group}"
+                break
+            items.extend(new)
+            seen.update(item["id"] for item in new)
+            if len(batch) < PAGE_SIZE:
+                complete = True
+                break
+    if not complete and not warning:
+        warning = f"Process3 pagination cap reached after {max_groups} groups"
+    return items, complete, warning
+
+
 def db():
     con = sqlite3.connect(DB)
     con.executescript("""
@@ -65,13 +148,25 @@ def match(text: str):
 
 
 def collect():
-    xml = fetch(RSS)
-    items, countbyday = parse(xml)
+    errors = []
+    rss_items, process3_items, countbyday = [], [], -1
+    try:
+        rss_items, countbyday = parse(fetch(RSS))
+    except (OSError, ValueError) as exc:
+        errors.append(f"RSS: {type(exc).__name__}")
+    try:
+        process3_items, complete, warning = fetch_process3()
+        if not complete:
+            errors.append(warning)
+    except (requests.RequestException, OSError, ValueError) as exc:
+        errors.append(f"Process3: {type(exc).__name__}")
+    if not rss_items and not process3_items:
+        raise RuntimeError("both e-GP sources returned no usable announcements: " + "; ".join(errors))
     con = db()
     now = datetime.now(TH).isoformat(timespec="seconds")
     new = hit = 0
-    for it in items:
-        key = hashlib.sha1((it["link"] or it["title"]).encode()).hexdigest()[:16]
+    for it in rss_items + process3_items:
+        key = it.get("id") or hashlib.sha1((it["link"] or it["title"]).encode()).hexdigest()[:16]
         if con.execute("SELECT 1 FROM ann WHERE id=?", (key,)).fetchone():
             continue
         kw = match(it["title"] + " " + it["desc"])
@@ -80,9 +175,11 @@ def collect():
                     (key, it["title"], it["link"], it["pub"], it["desc"], now, 1 if kw else 0, kw))
         new += 1
         hit += 1 if kw else 0
-    con.execute("INSERT INTO runs VALUES(?,?,?,?,?)", (now, len(items), new, hit, countbyday))
+    con.execute("INSERT INTO runs VALUES(?,?,?,?,?)", (now, len(rss_items) + len(process3_items), new, hit, countbyday))
     con.commit()
-    print(f"{now} | feed items={len(items)} countbyday={countbyday} | new={new} matched={hit}")
+    print(f"{now} | RSS={len(rss_items)} Process3={len(process3_items)} countbyday={countbyday} | new={new} matched={hit}")
+    if errors:
+        print("warning:", "; ".join(errors))
     con.close()
     return new, hit
 
@@ -112,5 +209,9 @@ if __name__ == "__main__":
                 break
             except Exception as e:                      # e-GP ล่มบ่อยช่วงกลางคืน
                 print("error:", e, "(retry in 60s)" if attempt < 2 else "(give up)")
+                if isinstance(e, sqlite3.OperationalError) and "readonly" in str(e).lower():
+                    sys.exit(1)
                 if attempt < 2:
                     time.sleep(60)
+                else:
+                    sys.exit(1)
