@@ -21,6 +21,7 @@ from budget_addons.budget.routes import WatchSourceInput, watch_create_source
     "http://10.0.0.1/", "http://example.org:8080/", "file:///etc/passwd",
     "https://user:pass@example.org/", "https://example.org/?token=secret",
     "https://example.org/#fragment", "http://singlelabel/",
+    "https://[64:ff9b::8.8.8.8]/", "https://[::8.8.8.8]/",
 ])
 def test_rejects_nonpublic_or_credential_urls(url):
     with pytest.raises(ValueError):
@@ -38,6 +39,13 @@ def test_public_fetch_rejects_mixed_public_private_dns_answers():
         (0, 0, 0, "", ("93.184.215.14", 443)),
         (0, 0, 0, "", ("10.0.0.5", 443)),
     ]
+    with pytest.raises(ValueError, match="private"):
+        watch_url.fetch_public("https://example.org/news", resolver=resolver)
+
+
+@pytest.mark.parametrize("answer", ["64:ff9b::a00:1", "::8.8.8.8"])
+def test_public_fetch_rejects_ipv6_translation_dns_answers(answer):
+    resolver = lambda *_args, **_kwargs: [(0, 0, 0, "", (answer, 443))]
     with pytest.raises(ValueError, match="private"):
         watch_url.fetch_public("https://example.org/news", resolver=resolver)
 

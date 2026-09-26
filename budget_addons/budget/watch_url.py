@@ -12,6 +12,18 @@ MAX_URL_LENGTH = 2048
 MAX_RESPONSE_BYTES = 2_000_000
 SENSITIVE_QUERY_KEYS = {"token", "access_token", "api_key", "apikey", "password", "secret", "auth", "session"}
 USER_AGENT = "pstack-budget-watch/0.2 (+contact: operations)"
+IPV6_TRANSLATION_PREFIXES = (
+    ipaddress.ip_network("64:ff9b::/96"),  # NAT64 well-known prefix
+    ipaddress.ip_network("::/96"),         # deprecated IPv4-compatible form
+)
+
+
+def _is_public_address(value: str) -> bool:
+    address = ipaddress.ip_address(value)
+    return address.is_global and not (
+        isinstance(address, ipaddress.IPv6Address)
+        and any(address in prefix for prefix in IPV6_TRANSLATION_PREFIXES)
+    )
 
 
 def validate_public_url(url: str) -> str:
@@ -40,7 +52,7 @@ def validate_public_url(url: str) -> str:
         if "." not in host:
             raise ValueError("hostname must be fully qualified") from None
     else:
-        if not address.is_global:
+        if not _is_public_address(str(address)):
             raise ValueError("private IP address is not allowed")
     return urlunsplit((parts.scheme, parts.netloc.lower(), parts.path or "/", parts.query, ""))
 
@@ -48,7 +60,7 @@ def validate_public_url(url: str) -> str:
 def _public_address(host: str, port: int, resolver=socket.getaddrinfo) -> str:
     answers = resolver(host, port, type=socket.SOCK_STREAM)
     addresses = {answer[4][0] for answer in answers}
-    if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
+    if not addresses or any(not _is_public_address(address) for address in addresses):
         raise ValueError("URL resolves to a private or invalid address")
     return sorted(addresses)[0]
 
