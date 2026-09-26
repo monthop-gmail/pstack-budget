@@ -64,6 +64,8 @@ curl --request POST --user "$BUDGET_API_USER:$BUDGET_PASSWORD" http://127.0.0.1:
 ```
 
 worker เดิมของ pstack ทำงานทุก 15 นาทีเป็นค่าเริ่มต้น (`WATCH_INTERVAL_MINUTES`).
+การดูแล watcher ระบบเดิมและวิธี rollback แยกไว้ที่
+[`docs/legacy-egp-watch-rollback.md`](docs/legacy-egp-watch-rollback.md).
 
 ## Cutover แบบปลอดภัย
 

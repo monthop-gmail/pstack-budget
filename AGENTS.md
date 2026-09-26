@@ -27,6 +27,9 @@ repository and collaboration rules.
    `git diff --check` before handoff.
 4. Use focused commits. Push only after verification and user authorization or
    when a tracked task explicitly requires delivery.
+5. This repo is public: verify the effective Git author and committer emails
+   use GitHub noreply before every commit. Set repo-local Git config if needed;
+   never rewrite published history without explicit owner approval.
 
 ## ai-collaboration-mcp
 
