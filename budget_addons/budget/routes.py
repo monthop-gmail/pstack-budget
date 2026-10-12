@@ -7,6 +7,7 @@ with BUDGET_API_USER (normally ``team``) and the same password.
 from __future__ import annotations
 
 import base64
+import asyncio
 import csv
 import hashlib
 import hmac
@@ -29,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.db import get_session
 
 from .models import WatchEvent, WatchSource
+from .tenders import find_tenders
 from .watch_services import run_once as run_watch_once
 from .watch_url import validate_public_url
 
@@ -356,6 +358,20 @@ async def watch_events(request: Request, session: Annotated[AsyncSession, Depend
         raise HTTPException(401, "unauthorized", headers={"WWW-Authenticate": "Basic"})
     rows = (await session.execute(select(WatchEvent).order_by(WatchEvent.discovered_at.desc(), WatchEvent.id.desc()).limit(min(max(limit, 1), 500)))).scalars()
     return {"events": [{"id": row.id, "source_id": row.source_id, "kind": row.kind, "title": row.title, "url": row.url, "published_at": row.published_at, "summary": row.summary, "discovered_at": row.discovered_at} for row in rows]}
+
+
+@router.get("/api/tenders")
+async def tenders(request: Request, q: str = "", days: int = 60, include_all: bool = False):
+    """Search public e-GP tenders without writing to the document mounts."""
+    if not _authenticated(request):
+        raise HTTPException(401, "unauthorized", headers={"WWW-Authenticate": "Basic"})
+    keywords = list(dict.fromkeys(part.strip() for part in re.split(r"[,\n]", q) if part.strip()))
+    if not keywords or len(keywords) > 8 or len(q) > 500 or not 7 <= days <= 365:
+        raise HTTPException(422, "provide 1-8 keywords, at most 500 characters, and days 7-365")
+    try:
+        return await asyncio.to_thread(find_tenders, keywords, days=days, include_all=include_all)
+    except ValueError as exc:
+        raise HTTPException(502, "public e-GP search is unavailable or its format changed") from exc
 
 
 @router.post("/api/watch/run")
